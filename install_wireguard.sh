@@ -218,19 +218,28 @@ configure_firewall() {
     print_success "Firewall configured successfully"
 }
 
-# Start WGDashboard
-start_wgdashboard() {
-    print_status "Starting WGDashboard..."
+# Start and enable WireGuard and WGDashboard
+start_services() {
+    print_status "Starting and enabling services..."
     
+    # Enable and start WireGuard
+    systemctl enable wg-quick@wg0
+    systemctl start wg-quick@wg0
+    
+    if systemctl is-active --quiet wg-quick@wg0; then
+        print_success "WireGuard VPN started and enabled for auto-start"
+    else
+        print_warning "WireGuard VPN may not have started properly. Check systemctl status wg-quick@wg0"
+    fi
+    
+    # Start WGDashboard
     cd $WG_DASHBOARD_DIR/src
-    
-    # Start WGDashboard using the official method
     ./wgd.sh start
     
     # Start the systemd service
     systemctl start wgdashboard
     
-    # Wait for service to be ready
+    # Wait for services to be ready
     sleep 5
     
     if systemctl is-active --quiet wgdashboard; then
@@ -272,10 +281,10 @@ display_final_info() {
     print_status "🔧 WireGuard Configuration:"
     echo "   • Config file: /etc/wireguard/wg0.conf"
     echo "   • Server keys: /etc/wireguard/server_*.key"
-    echo "   • Start VPN:   systemctl start wg-quick@wg0"
-    echo "   • Stop VPN:    systemctl stop wg-quick@wg0"
-    echo "   • Enable at boot: systemctl enable wg-quick@wg0"
     echo "   • VPN Status:  wg show"
+    echo "   • Manual start: systemctl start wg-quick@wg0"
+    echo "   • Manual stop:  systemctl stop wg-quick@wg0"
+    echo "   • ✅ Auto-start: ENABLED (starts on boot)"
     echo ""
     
     print_status "🖥️  WGDashboard Management:"
@@ -285,11 +294,12 @@ display_final_info() {
     echo "   • Service stop:  systemctl stop wgdashboard"
     echo "   • Service status: systemctl status wgdashboard"
     echo "   • View logs:     journalctl -u wgdashboard -f"
+    echo "   • ✅ Auto-start: ENABLED (starts on boot)"
     echo ""
     
     print_status "📋 Next Steps:"
     echo "   1. Access the dashboard and change default credentials"
-    echo "   2. Start WireGuard: systemctl start wg-quick@wg0"
+    echo "   2. ✅ WireGuard is already running and will auto-start on boot"
     echo "   3. Add your first peer through the web interface"
     echo "   4. Download/scan QR code for client configuration"
     echo ""
@@ -328,7 +338,7 @@ main() {
     install_wgdashboard
     setup_wgdashboard_service
     configure_firewall
-    start_wgdashboard
+    start_services
     display_final_info
     
     echo ""
