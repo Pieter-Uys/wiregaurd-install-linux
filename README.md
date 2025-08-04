@@ -1,6 +1,6 @@
 # WireGuard + WGDashboard Auto-Installer
 
-A comprehensive, one-click installation script for setting up WireGuard VPN server with WGDashboard web interface on Debian/Ubuntu systems.
+A comprehensive, one-click installation script for setting up WireGuard VPN server with WGDashboard web interface on Debian/Ubuntu systems. Features universal compatibility for both minimal and full Debian installations with intelligent sudo handling and automatic IP detection.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
@@ -9,6 +9,8 @@ A comprehensive, one-click installation script for setting up WireGuard VPN serv
 ## 🚀 Features
 
 - **One-Click Installation**: Complete setup with a single command
+- **Universal Compatibility**: Works on both minimal Debian (no sudo) and full installations
+- **Automatic IP Detection**: Detects and displays server public IP for client configuration
 - **Latest Versions**: Always installs the most recent stable versions
 - **Official Documentation Compliance**: Follows best practices from [WireGuard](https://www.wireguard.com/install/) and [WGDashboard](https://wgdashboard.dev/) official docs
 - **Comprehensive Setup**: Includes firewall configuration, systemd services, and security hardening
@@ -16,6 +18,7 @@ A comprehensive, one-click installation script for setting up WireGuard VPN serv
 - **Automatic Key Generation**: Generates server keys and initial configuration
 - **IP Forwarding**: Properly configured for VPN traffic routing
 - **Error Handling**: Robust error checking and helpful status messages
+- **Sudo Handling**: Intelligent sudo detection and handling for root/non-root scenarios
 
 ## 📋 Requirements
 
@@ -41,20 +44,22 @@ A comprehensive, one-click installation script for setting up WireGuard VPN serv
 
 ```bash
 # Download and run the installer
-curl -sSL https://raw.githubusercontent.com/[your-username]/wireguard-installer/main/install_wireguard.sh | sudo bash
+wget -O wg_install.sh "https://raw.githubusercontent.com/[your-username]/wireguard-installer/main/wg_install.sh"
+chmod +x wg_install.sh
+sudo bash wg_install.sh
 ```
 
 ### Manual Installation
 
 ```bash
 # Download the script
-wget https://raw.githubusercontent.com/[your-username]/wireguard-installer/main/install_wireguard.sh
+wget https://raw.githubusercontent.com/[your-username]/wireguard-installer/main/wg_install.sh
 
 # Make it executable
-chmod +x install_wireguard.sh
+chmod +x wg_install.sh
 
 # Run with sudo
-sudo ./install_wireguard.sh
+sudo bash wg_install.sh
 ```
 
 ### Git Clone Method
@@ -65,7 +70,7 @@ git clone https://github.com/[your-username]/wireguard-installer.git
 cd wireguard-installer
 
 # Run the installer
-sudo bash install_wireguard.sh
+sudo bash wg_install.sh
 ```
 
 ## 📦 What Gets Installed
@@ -95,12 +100,18 @@ sudo bash install_wireguard.sh
    ```
    http://your-server-ip:10086
    ```
+   Or locally:
+   ```
+   http://localhost:10086
+   ```
 
 2. **Login with default credentials**:
    - Username: `admin`
    - Password: `admin`
 
 3. **⚠️ IMMEDIATELY change the default password** for security!
+
+**Note**: The script will display your server's public IP during installation for client configuration purposes.
 
 ### Start WireGuard VPN
 
@@ -140,11 +151,11 @@ sudo wg showconf wg0
 
 ### WGDashboard Commands
 ```bash
-# Manual control
+# Manual control (uses wrapper script for sudo compatibility)
 cd /opt/WGDashboard/src
-sudo ./wgd.sh start
-sudo ./wgd.sh stop
-sudo ./wgd.sh restart
+./wgd_wrapper.sh start
+./wgd_wrapper.sh stop
+./wgd_wrapper.sh restart
 
 # Systemd service control
 sudo systemctl start wgdashboard
@@ -271,7 +282,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📊 Statistics
 
 - **Installation Time**: ~2-5 minutes (depending on system)
-- **Script Size**: ~15KB
+- **Script Size**: ~9.7KB
 - **Tested Systems**: Ubuntu 20.04+, Debian 11+
 - **Dependencies**: Automatically handled
 
