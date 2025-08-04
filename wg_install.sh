@@ -191,22 +191,20 @@ configure_firewall() {
     print_success "Firewall configured successfully"
 }
 
-# Check if sudo is available
-check_sudo() {
-    if command -v sudo >/dev/null 2>&1; then
-        SUDO_CMD="sudo"
-        print_status "sudo is available, will use it for WGDashboard"
+# Override sudo function to handle both root and non-root scenarios
+# Based on: https://nickjanetakis.com/blog/ignore-sudo-in-a-shell-script-if-you-are-running-as-root
+sudo() {
+    if [[ "${EUID}" == 0 ]]; then
+        # If we're root, just run the command without sudo
+        "${@}"
     else
-        SUDO_CMD=""
-        print_status "sudo not available, running as root (no sudo needed)"
+        # If we're not root, use actual sudo
+        command sudo "${@}"
     fi
 }
 
 start_services() {
     print_status "Starting and enabling services..."
-    
-    # Check sudo availability
-    check_sudo
     
     systemctl enable wg-quick@wg0
     systemctl start wg-quick@wg0
@@ -219,12 +217,10 @@ start_services() {
     
     cd $WG_DASHBOARD_DIR/src
     
-    # Start WGDashboard with or without sudo based on availability
-    if [[ -n "$SUDO_CMD" ]]; then
-        $SUDO_CMD ./wgd.sh start
-    else
-        ./wgd.sh start
-    fi
+    # Start WGDashboard - sudo function will handle root/non-root automatically
+    print_status "Starting WGDashboard..."
+    ./wgd.sh start
+    print_success "WGDashboard started successfully"
     
     systemctl start wgdashboard
     
