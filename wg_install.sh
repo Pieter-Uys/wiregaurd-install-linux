@@ -217,9 +217,34 @@ start_services() {
     
     cd $WG_DASHBOARD_DIR/src
     
-    # Start WGDashboard - sudo function will handle root/non-root automatically
+    # Create a wrapper script that handles sudo calls in wgd.sh
+    print_status "Creating WGDashboard wrapper to handle sudo calls..."
+    cat > ./wgd_wrapper.sh << 'EOF'
+#!/bin/bash
+
+# Override sudo function for WGDashboard
+sudo() {
+    if [[ "${EUID}" == 0 ]]; then
+        # If we're root, just run the command without sudo
+        "${@}"
+    else
+        # If we're not root, use actual sudo
+        command sudo "${@}"
+    fi
+}
+
+# Export the function so it's available to wgd.sh
+export -f sudo
+
+# Run the original wgd.sh script
+./wgd.sh "$@"
+EOF
+
+    chmod +x ./wgd_wrapper.sh
+    
+    # Start WGDashboard using our wrapper
     print_status "Starting WGDashboard..."
-    ./wgd.sh start
+    ./wgd_wrapper.sh start
     print_success "WGDashboard started successfully"
     
     systemctl start wgdashboard
