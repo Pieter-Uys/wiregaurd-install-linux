@@ -191,8 +191,22 @@ configure_firewall() {
     print_success "Firewall configured successfully"
 }
 
+# Check if sudo is available
+check_sudo() {
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO_CMD="sudo"
+        print_status "sudo is available, will use it for WGDashboard"
+    else
+        SUDO_CMD=""
+        print_status "sudo not available, running as root (no sudo needed)"
+    fi
+}
+
 start_services() {
     print_status "Starting and enabling services..."
+    
+    # Check sudo availability
+    check_sudo
     
     systemctl enable wg-quick@wg0
     systemctl start wg-quick@wg0
@@ -204,7 +218,13 @@ start_services() {
     fi
     
     cd $WG_DASHBOARD_DIR/src
-    ./wgd.sh start
+    
+    # Start WGDashboard with or without sudo based on availability
+    if [[ -n "$SUDO_CMD" ]]; then
+        $SUDO_CMD ./wgd.sh start
+    else
+        ./wgd.sh start
+    fi
     
     systemctl start wgdashboard
     
