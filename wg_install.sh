@@ -72,6 +72,9 @@ update_and_install_essentials() {
         git \
         curl \
         iptables \
+        python3 \
+        python3-pip \
+        python3-venv \
         --no-install-recommends
     
     print_success "Essential packages installed"
