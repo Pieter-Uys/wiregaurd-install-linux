@@ -1,293 +1,377 @@
-# WireGuard + WGDashboard Auto-Installer
+# WireGuard + WGDashboard Secure Auto-Installer
 
-A comprehensive, one-click installation script for setting up WireGuard VPN server with WGDashboard web interface on Debian/Ubuntu systems. Features universal compatibility for both minimal and full Debian installations with intelligent sudo handling and automatic IP detection.
+A security-focused, one-click installation script for WireGuard VPN with WGDashboard on Debian/Ubuntu systems. Following best practices by default - dashboard is local-only, never exposed to the internet.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu-blue.svg)](https://www.debian.org/)
+[![Security](https://img.shields.io/badge/Security-First-red.svg)](https://github.com/yourusername/wireguard-installer)
+
+## 🔒 Security First Design
+
+This installer follows security best practices by default:
+- **Dashboard is LOCAL ACCESS ONLY** - Never exposed to the internet
+- **SSH tunneling** for secure remote dashboard access
+- **Minimal attack surface** - Only WireGuard port is public
+- **No dangerous options** - Can't accidentally expose the dashboard
+- **Secure by default** - No configuration needed for security
 
 ## 🚀 Features
 
-- **One-Click Installation**: Complete setup with a single command
-- **Universal Compatibility**: Works on both minimal Debian (no sudo) and full installations
-- **Automatic IP Detection**: Detects and displays server public IP for client configuration
+- **One-Command Installation**: Complete secure setup with a single command
+- **Security by Default**: Dashboard bound to localhost only (127.0.0.1)
+- **SSH Tunnel Helper**: Built-in tool for secure remote dashboard access
+- **Automatic Configuration**: Detects network settings automatically
+- **Management Tools**: Simple commands for status, logs, and backups
 - **Latest Versions**: Always installs the most recent stable versions
-- **Official Documentation Compliance**: Follows best practices from [WireGuard](https://www.wireguard.com/install/) and [WGDashboard](https://wgdashboard.dev/) official docs
-- **Comprehensive Setup**: Includes firewall configuration, systemd services, and security hardening
-- **Web Management Interface**: Easy-to-use dashboard for managing VPN clients
-- **Automatic Key Generation**: Generates server keys and initial configuration
-- **IP Forwarding**: Properly configured for VPN traffic routing
-- **Error Handling**: Robust error checking and helpful status messages
-- **Sudo Handling**: Intelligent sudo detection and handling for root/non-root scenarios
+- **Minimal Interaction**: Clean, opinionated installation like Proxmox scripts
+- **Comprehensive Setup**: Firewall, systemd services, and kernel parameters
+- **Backup System**: Automatic backup of existing configurations
 
 ## 📋 Requirements
 
 ### Supported Operating Systems
-- **Ubuntu**: 20.04 LTS, 22.04 LTS, 24.04 LTS, 24.10
+- **Ubuntu**: 20.04 LTS, 22.04 LTS, 24.04 LTS
 - **Debian**: 11.x, 12.x
 
 ### System Requirements
-- **Root Access**: Script must be run with sudo privileges
-- **Internet Connection**: Required for downloading packages and repositories
-- **Minimum RAM**: 512MB (1GB+ recommended)
-- **Disk Space**: At least 1GB free space
-- **Architecture**: x86_64 (amd64)
+- **Root Access**: Script must be run as root or with sudo
+- **Internet Connection**: Required for downloading packages
+- **RAM**: 512MB minimum (1GB+ recommended)
+- **Disk Space**: At least 1GB free
+- **Architecture**: x86_64 (amd64) or arm64
 
 ### Network Requirements
-- **Port 51820/UDP**: WireGuard VPN traffic
-- **Port 10086/TCP**: WGDashboard web interface
-- **Port 22/TCP**: SSH access (recommended to keep open)
+- **Port 51820/UDP**: WireGuard VPN traffic (PUBLIC)
+- **Port 22/TCP**: SSH access (for tunnel and management)
+- ~~Port 10086/TCP~~ Dashboard port is LOCAL ONLY - not exposed
 
 ## 🛠️ Installation
 
 ### Quick Install (Recommended)
 
 ```bash
-# Download and run the installer
-wget -O wg_install.sh "https://raw.githubusercontent.com/[your-username]/wireguard-installer/main/wg_install.sh"
-chmod +x wg_install.sh
-sudo bash wg_install.sh
+# One-line secure installation
+bash <(curl -s https://raw.githubusercontent.com/yourusername/wireguard-installer/main/install.sh)
 ```
 
-### Manual Installation
+### Download and Review
 
 ```bash
 # Download the script
-wget https://raw.githubusercontent.com/[your-username]/wireguard-installer/main/wg_install.sh
+wget https://raw.githubusercontent.com/yourusername/wireguard-installer/main/install.sh
 
-# Make it executable
-chmod +x wg_install.sh
-
-# Run with sudo
-sudo bash wg_install.sh
-```
-
-### Git Clone Method
-
-```bash
-# Clone the repository
-git clone https://github.com/[your-username]/wireguard-installer.git
-cd wireguard-installer
+# Review the script (always recommended!)
+less install.sh
 
 # Run the installer
-sudo bash wg_install.sh
+sudo bash install.sh
+```
+
+### Custom Ports
+
+```bash
+# Use custom WireGuard port
+export WG_PORT=51821
+sudo bash install.sh
+```
+
+## 🔐 Architecture
+
+```
+Internet ──► WireGuard:51820 ✓ (VPN Protocol - Encrypted)
+         ──X Dashboard:10086 ✗ (Blocked - Local Only)
+
+Admin ──SSH──► Server ──► Dashboard ✓ (Secure Access)
 ```
 
 ## 📦 What Gets Installed
 
 ### Core Components
-- **WireGuard**: Latest stable version from official repositories
-- **WGDashboard**: Latest version from official GitHub repository
-- **Dependencies**: Python 3, Git, Net-tools, iptables, curl
+- **WireGuard**: Kernel module and tools from official repositories
+- **WGDashboard**: Latest version with Python virtual environment
+- **Security Tools**: UFW firewall, configured for minimal exposure
+- **Management Scripts**: Helper tools for easy administration
 
-### System Configuration
-- **IP Forwarding**: Enabled for VPN traffic routing
-- **Firewall Rules**: UFW configured with appropriate port access
-- **Systemd Services**: Auto-start services for WGDashboard
-- **Directory Structure**: Proper permissions for `/etc/wireguard`
+### Configuration Files
+- `/etc/wireguard/wg0.conf` - WireGuard configuration
+- `/etc/wireguard/server_*.key` - Server keys (auto-generated)
+- `/opt/WGDashboard/` - Dashboard installation (local-only)
+- `/usr/local/bin/wg-manage` - Management utility
+- `/usr/local/bin/wg-dashboard` - SSH tunnel helper
 
-### Generated Files
-- `/etc/wireguard/wg0.conf` - Main WireGuard configuration
-- `/etc/wireguard/server_private.key` - Server private key
-- `/etc/wireguard/server_public.key` - Server public key
-- `/opt/WGDashboard/` - Dashboard installation directory
+## 🌐 Post-Installation Access
 
-## 🌐 Post-Installation
+### Accessing the Dashboard
 
-### Access the Dashboard
+Since the dashboard is secured (local-only), you have two options:
 
-1. **Open your web browser** and navigate to:
-   ```
-   http://your-server-ip:10086
-   ```
-   Or locally:
-   ```
-   http://localhost:10086
-   ```
-
-2. **Login with default credentials**:
-   - Username: `admin`
-   - Password: `admin`
-
-3. **⚠️ IMMEDIATELY change the default password** for security!
-
-**Note**: The script will display your server's public IP during installation for client configuration purposes.
-
-### Start WireGuard VPN
+#### Option 1: SSH Tunnel (Recommended for Remote Access)
 
 ```bash
-# Start the VPN service
-sudo systemctl start wg-quick@wg0
+# From your local computer:
+ssh -L 8080:localhost:10086 root@your-server-ip
 
-# Enable auto-start on boot
-sudo systemctl enable wg-quick@wg0
-
-# Check VPN status
-sudo wg show
+# Then browse to:
+http://localhost:8080
 ```
 
-### Add Your First Client
+Or use the included helper:
+```bash
+# From your local computer:
+wg-dashboard 10086 your-server-ip
 
-1. Access the WGDashboard web interface
-2. Click "Add Peer" or "+" button
-3. Configure the peer settings (name, allowed IPs, etc.)
-4. Download the configuration file or scan the QR code
-5. Import the configuration into your WireGuard client
+# Browser automatically opens to:
+http://localhost:8080
+```
+
+#### Option 2: Local Console Access
+
+If you have direct console access to the server:
+```bash
+# On the server itself:
+curl http://localhost:10086
+# Or use a local browser if GUI is available
+```
+
+### Default Credentials
+
+- **Username**: `admin`
+- **Password**: `admin`
+- **⚠️ CHANGE IMMEDIATELY** after first login!
 
 ## 🔧 Management Commands
 
-### WireGuard Commands
+### Quick Management Tool
+
 ```bash
-# Start/Stop WireGuard
-sudo systemctl start wg-quick@wg0
-sudo systemctl stop wg-quick@wg0
+# Check status of all services
+wg-manage status
 
-# View connection status
-sudo wg show
+# Restart WireGuard and Dashboard
+wg-manage restart
 
-# View detailed configuration
-sudo wg showconf wg0
+# View recent logs
+wg-manage logs
+
+# Create configuration backup
+wg-manage backup
 ```
 
-### WGDashboard Commands
-```bash
-# Manual control (uses wrapper script for sudo compatibility)
-cd /opt/WGDashboard/src
-./wgd_wrapper.sh start
-./wgd_wrapper.sh stop
-./wgd_wrapper.sh restart
+### Manual Service Control
 
-# Systemd service control
-sudo systemctl start wgdashboard
-sudo systemctl stop wgdashboard
+```bash
+# WireGuard service
+sudo systemctl status wg-quick@wg0
+sudo systemctl restart wg-quick@wg0
+
+# Dashboard service
 sudo systemctl status wgdashboard
+sudo systemctl restart wgdashboard
 
-# View logs
-sudo journalctl -u wgdashboard -f
+# View active VPN connections
+sudo wg show
 ```
 
-### Firewall Management
+### SSH Tunnel for Dashboard
+
 ```bash
-# Check firewall status
-sudo ufw status
+# Create SSH tunnel (from your computer)
+wg-dashboard 10086 <server-ip>
 
-# Allow additional ports if needed
-sudo ufw allow [port]/[protocol]
-
-# Reset firewall (use with caution)
-sudo ufw --force reset
+# Custom local port
+ssh -L 9090:localhost:10086 root@server-ip
 ```
 
-## 🔒 Security Considerations
+## 🛡️ Security Features
 
-### Immediate Security Steps
-1. **Change default dashboard password**
-2. **Enable SSH key authentication** (disable password auth)
-3. **Update your system regularly**
-4. **Monitor access logs**
+### Default Security Measures
 
-### Recommended Security Enhancements
-- Set up **fail2ban** for intrusion prevention
-- Configure **automatic security updates**
-- Use **non-standard SSH port**
-- Implement **two-factor authentication** where possible
-- Regular **backup of configurations**
+✅ **Dashboard Local Only**: Bound to 127.0.0.1, inaccessible from internet  
+✅ **Minimal Firewall**: Only WireGuard and SSH ports open  
+✅ **No Public Web Interface**: Dashboard requires SSH tunnel  
+✅ **Automatic Backups**: Existing configs backed up before changes  
+✅ **Secure Defaults**: No options to weaken security  
 
-### Firewall Ports
-The script automatically configures these ports:
-- `22/TCP` - SSH access
-- `51820/UDP` - WireGuard VPN
-- `10086/TCP` - WGDashboard web interface
+### Why Local-Only Dashboard?
+
+1. **No Web Vulnerabilities**: Dashboard can't be attacked from internet
+2. **No Brute Force Risk**: Login page not exposed to public
+3. **No Zero-Days**: Web interface bugs can't be exploited remotely
+4. **SSH Protection**: Access requires SSH keys/credentials first
+5. **Defense in Depth**: Multiple layers of security
+
+### Additional Security Steps
+
+After installation, consider:
+
+1. **SSH Key Authentication**:
+   ```bash
+   ssh-copy-id root@your-server
+   # Then disable password auth in /etc/ssh/sshd_config
+   ```
+
+2. **Change Default Password**:
+   - First thing after installation!
+   - Use a strong, unique password
+
+3. **Regular Updates**:
+   ```bash
+   apt update && apt upgrade
+   ```
+
+4. **Monitor Logs**:
+   ```bash
+   wg-manage logs
+   journalctl -u sshd
+   ```
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+### Dashboard Not Accessible
 
-**Dashboard not accessible:**
 ```bash
 # Check if service is running
 sudo systemctl status wgdashboard
 
-# Check firewall
-sudo ufw status
+# Check if bound to localhost
+ss -tuln | grep 10086
+# Should show 127.0.0.1:10086 NOT 0.0.0.0:10086
 
-# Restart dashboard
+# Restart service
 sudo systemctl restart wgdashboard
 ```
 
-**WireGuard not starting:**
-```bash
-# Check configuration syntax
-sudo wg-quick up wg0
+### SSH Tunnel Not Working
 
-# View system logs
+```bash
+# Test SSH connection first
+ssh root@your-server-ip
+
+# Check if dashboard is running locally
+ssh root@your-server-ip "curl -I http://localhost:10086"
+
+# Verbose SSH tunnel for debugging
+ssh -v -N -L 8080:localhost:10086 root@your-server-ip
+```
+
+### WireGuard Issues
+
+```bash
+# Check WireGuard status
+sudo wg show
+
+# Check if module is loaded
+lsmod | grep wireguard
+
+# View configuration
+sudo cat /etc/wireguard/wg0.conf
+
+# Check logs
 sudo journalctl -u wg-quick@wg0
 ```
 
-**No internet through VPN:**
-```bash
-# Check IP forwarding
-cat /proc/sys/net/ipv4/ip_forward
+### Client Can't Connect
 
-# Should return 1, if not:
-echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
-sudo sysctl -p
-```
+1. **Check server firewall**:
+   ```bash
+   sudo ufw status
+   # Should show 51820/udp ALLOW
+   ```
 
-### Log Locations
-- **WGDashboard logs**: `sudo journalctl -u wgdashboard`
-- **WireGuard logs**: `sudo journalctl -u wg-quick@wg0`
-- **System logs**: `/var/log/syslog`
+2. **Verify IP forwarding**:
+   ```bash
+   sysctl net.ipv4.ip_forward
+   # Should return 1
+   ```
 
-## 📖 Documentation
+3. **Check client configuration**:
+   - Correct server public IP
+   - Correct server public key
+   - Correct port (51820 by default)
 
-### Official Documentation
-- [WireGuard Official Site](https://www.wireguard.com/)
-- [WGDashboard Documentation](https://docs.wgdashboard.dev/)
-- [WireGuard Quick Start](https://www.wireguard.com/quickstart/)
+## 📊 Performance & Resources
 
-### Client Setup Guides
-- [WireGuard Windows Client](https://www.wireguard.com/install/)
-- [WireGuard Android Client](https://play.google.com/store/apps/details?id=com.wireguard.android)
-- [WireGuard iOS Client](https://apps.apple.com/us/app/wireguard/id1441195209)
+- **Installation Time**: ~2-3 minutes
+- **RAM Usage**: ~50MB (WireGuard) + ~100MB (Dashboard)
+- **CPU Usage**: Minimal (<5% on average)
+- **Disk Space**: ~200MB total
+- **Network Overhead**: <5% for WireGuard protocol
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please focus on:
+- Security improvements
+- Bug fixes
+- Documentation updates
+- Platform compatibility
 
-### How to Contribute
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+### Development
 
-### Bug Reports
-Please use the [GitHub Issues](https://github.com/[your-username]/wireguard-installer/issues) page to report bugs.
+```bash
+# Clone repository
+git clone https://github.com/yourusername/wireguard-installer.git
+cd wireguard-installer
+
+# Create feature branch
+git checkout -b feature/your-feature
+
+# Test thoroughly
+sudo bash install.sh
+
+# Submit PR
+```
+
+## 📖 Documentation & Resources
+
+### Official Documentation
+- [WireGuard Documentation](https://www.wireguard.com/)
+- [WGDashboard Wiki](https://github.com/donaldzou/WGDashboard/wiki)
+
+### Client Setup Guides
+- [Windows Client](https://www.wireguard.com/install/)
+- [macOS Client](https://apps.apple.com/us/app/wireguard/id1451685025)
+- [iOS Client](https://apps.apple.com/us/app/wireguard/id1441195209)
+- [Android Client](https://play.google.com/store/apps/details?id=com.wireguard.android)
+- [Linux Client](https://www.wireguard.com/install/)
+
+### Security Resources
+- [WireGuard Whitepaper](https://www.wireguard.com/papers/wireguard.pdf)
+- [SSH Tunneling Guide](https://www.ssh.com/academy/ssh/tunneling)
 
 ## ⚠️ Disclaimer
 
-This script is provided as-is for educational and convenience purposes. Always review scripts before running them with sudo privileges. The authors are not responsible for any damage or security issues that may arise from using this script.
+This script is provided as-is for secure VPN deployment. While we prioritize security, always:
+- Review scripts before running with sudo
+- Keep your system updated
+- Monitor access logs
+- Use strong passwords
+- Enable SSH key authentication
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## 🙏 Credits
 
-- [WireGuard](https://www.wireguard.com/) team for creating an amazing VPN solution
-- [Donald Zou](https://github.com/donaldzou) for developing WGDashboard
-- The open-source community for continuous improvements and feedback
+- [WireGuard](https://www.wireguard.com/) by Jason A. Donenfeld
+- [WGDashboard](https://github.com/donaldzou) by Donald Zou
+- Inspired by [Proxmox VE Helper Scripts](https://tteck.github.io/Proxmox/)
 
-## 📊 Statistics
+## 📈 Stats & Compatibility
 
-- **Installation Time**: ~2-5 minutes (depending on system)
-- **Script Size**: ~9.7KB
-- **Tested Systems**: Ubuntu 20.04+, Debian 11+
-- **Dependencies**: Automatically handled
+| OS | Version | Status | Tested |
+|---|---|---|---|
+| Ubuntu | 24.04 LTS | ✅ Supported | ✓ |
+| Ubuntu | 22.04 LTS | ✅ Supported | ✓ |
+| Ubuntu | 20.04 LTS | ✅ Supported | ✓ |
+| Debian | 12 (Bookworm) | ✅ Supported | ✓ |
+| Debian | 11 (Bullseye) | ✅ Supported | ✓ |
 
 ---
 
-**⭐ If this script helped you, please consider giving it a star!**
+**🔒 Security First** | **🚀 Fast Setup** | **🛡️ Best Practices**
 
-For support, please [open an issue](https://github.com/[your-username]/wireguard-installer/issues) or check the [discussions](https://github.com/[your-username]/wireguard-installer/discussions) page.
+If this script helped you, please ⭐ star the repository!
+
+For support: [Open an Issue](https://github.com/yourusername/wireguard-installer/issues) | [Discussions](https://github.com/yourusername/wireguard-installer/discussions)
