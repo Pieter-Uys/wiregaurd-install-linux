@@ -1,12 +1,14 @@
 #!/bin/bash
 
 # WireGuard + WGDashboard Auto-Installer Script
+# Secure by default - Dashboard local access only
 # Compatible with Debian/Ubuntu systems
-# Run with: sudo bash wg_install.sh
+# Version: 1.0
+# Run with: bash <(curl -s https://raw.githubusercontent.com/yourusername/wg-installer/main/install.sh)
 
-set -e
+set -euo pipefail
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -14,339 +16,412 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Configuration
+WG_DIR="/etc/wireguard"
 WG_DASHBOARD_DIR="/opt/WGDashboard"
-WG_PORT="51820"
-DASHBOARD_PORT="10086"
+WG_PORT="${WG_PORT:-51820}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-10086}"
+WG_INTERFACE="wg0"
+WG_SUBNET="10.0.0.0/24"
+WG_SERVER_IP="10.0.0.1"
 
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+# Script info
+SCRIPT_VERSION="1.0"
+LOG_FILE="/var/log/wg-installer.log"
+
+# Logging setup
+exec 2> >(tee -a "$LOG_FILE" >&2)
+
+msg() {
+    echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+success() {
+    echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+warn() {
+    echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+error() {
+    echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+header() {
+    echo ""
+    echo "====================================="
+    echo " WireGuard + Dashboard Installer"
+    echo " Version: $SCRIPT_VERSION"
+    echo "====================================="
+    echo ""
 }
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        print_error "This script must be run as root or with sudo"
-        echo "Usage: sudo bash $0"
+        error "This script must be run as root"
         exit 1
     fi
 }
 
-detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        source /etc/os-release
-        OS=$ID
-        OS_VERSION=$VERSION_ID
-    else
-        print_error "Cannot detect OS. This script supports Debian/Ubuntu only."
+check_os() {
+    if [[ ! -f /etc/os-release ]]; then
+        error "Cannot detect OS"
         exit 1
     fi
     
-    if [[ "$OS" != "ubuntu" && "$OS" != "debian" ]]; then
-        print_error "Unsupported OS: $OS. This script supports Debian/Ubuntu only."
+    source /etc/os-release
+    if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
+        error "This script supports Debian/Ubuntu only"
         exit 1
     fi
     
-    print_success "Detected OS: $OS $OS_VERSION"
+    success "Detected: $PRETTY_NAME"
 }
 
-update_and_install_essentials() {
-    print_status "Updating package lists and installing essential packages..."
+check_virt() {
+    if command -v systemd-detect-virt &> /dev/null; then
+        VIRT=$(systemd-detect-virt)
+        if [[ "$VIRT" != "none" ]]; then
+            msg "Virtualization: $VIRT"
+            if [[ "$VIRT" == "lxc" || "$VIRT" == "openvz" ]]; then
+                warn "Container detected - kernel module must be loaded on host"
+                read -p "Continue? (y/N): " -n 1 -r
+                echo
+                [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+            fi
+        fi
+    fi
+}
+
+backup_existing() {
+    if [[ -d "$WG_DIR" ]] || [[ -d "$WG_DASHBOARD_DIR" ]]; then
+        BACKUP_DIR="/root/wg-backup-$(date +%Y%m%d-%H%M%S)"
+        msg "Backing up existing configuration to $BACKUP_DIR"
+        mkdir -p "$BACKUP_DIR"
+        [[ -d "$WG_DIR" ]] && cp -r "$WG_DIR" "$BACKUP_DIR/" 2>/dev/null || true
+        [[ -d "$WG_DASHBOARD_DIR/db" ]] && cp -r "$WG_DASHBOARD_DIR/db" "$BACKUP_DIR/" 2>/dev/null || true
+        success "Backup completed"
+    fi
+}
+
+install_packages() {
+    msg "Installing required packages..."
     
-    apt-get update -y
+    apt-get update -qq
     
-    apt-get install -y \
-        wireguard-tools \
-        net-tools \
-        git \
-        curl \
-        iptables \
-        python3 \
-        python3-pip \
-        python3-venv \
-        --no-install-recommends
+    PACKAGES=(
+        wireguard
+        wireguard-tools
+        python3
+        python3-pip
+        python3-venv
+        git
+        curl
+        iptables
+        net-tools
+        qrencode
+    )
     
-    print_success "Essential packages installed"
+    for pkg in "${PACKAGES[@]}"; do
+        apt-get install -y "$pkg" --no-install-recommends &>/dev/null || warn "Failed to install $pkg"
+    done
+    
+    success "Packages installed"
+}
+
+setup_sysctl() {
+    msg "Configuring kernel parameters..."
+    
+    cat > /etc/sysctl.d/99-wireguard.conf << EOF
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+EOF
+    
+    sysctl --system &>/dev/null
+    success "Kernel parameters configured"
+}
+
+get_public_ip() {
+    for url in "https://ipinfo.io/ip" "https://ifconfig.me" "https://api.ipify.org"; do
+        PUBLIC_IP=$(curl -s --max-time 3 "$url" 2>/dev/null | grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -n1)
+        [[ -n "$PUBLIC_IP" ]] && break
+    done
+    echo "${PUBLIC_IP:-Unable to determine}"
+}
+
+get_interface() {
+    # Get default network interface
+    IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+    if [[ -z "$IFACE" ]]; then
+        IFACE=$(ip link | awk -F: '$0 !~ "lo|vir|wl|^[^0-9]"{print $2;getline}' | head -n1 | xargs)
+    fi
+    echo "${IFACE:-eth0}"
 }
 
 setup_wireguard() {
-    print_status "Setting up WireGuard..."
+    msg "Setting up WireGuard..."
     
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
-    sysctl -p /etc/sysctl.conf
+    # Create directory
+    mkdir -p "$WG_DIR"
+    chmod 700 "$WG_DIR"
+    cd "$WG_DIR"
     
-    mkdir -p /etc/wireguard
-    chmod 700 /etc/wireguard
+    # Generate keys
+    if [[ ! -f server_private.key ]]; then
+        wg genkey | tee server_private.key | wg pubkey > server_public.key
+        chmod 600 server_*.key
+    fi
     
-    print_success "WireGuard setup completed"
+    SERVER_PRIVATE_KEY=$(cat server_private.key)
+    SERVER_PUBLIC_KEY=$(cat server_public.key)
+    INTERFACE=$(get_interface)
+    
+    # Create config
+    cat > "${WG_INTERFACE}.conf" << EOF
+[Interface]
+PrivateKey = $SERVER_PRIVATE_KEY
+Address = ${WG_SERVER_IP}/24
+ListenPort = $WG_PORT
+SaveConfig = false
+
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $INTERFACE -j MASQUERADE
+EOF
+    
+    chmod 600 "${WG_INTERFACE}.conf"
+    
+    # Enable and start
+    systemctl enable "wg-quick@${WG_INTERFACE}" &>/dev/null
+    systemctl restart "wg-quick@${WG_INTERFACE}"
+    
+    success "WireGuard configured (Public key: $SERVER_PUBLIC_KEY)"
 }
 
-install_wgdashboard() {
-    print_status "Installing WGDashboard..."
+install_dashboard() {
+    msg "Installing WGDashboard..."
     
-    rm -rf $WG_DASHBOARD_DIR
+    # Stop services
+    systemctl stop wgdashboard &>/dev/null || true
     
-    cd /opt
-    git clone https://github.com/donaldzou/WGDashboard.git
+    # Remove old installation
+    rm -rf "$WG_DASHBOARD_DIR"
     
-    cd $WG_DASHBOARD_DIR/src
+    # Clone repository
+    git clone -q https://github.com/donaldzou/WGDashboard.git "$WG_DASHBOARD_DIR"
+    cd "$WG_DASHBOARD_DIR"
     
-    chmod +x ./wgd.sh
-    ./wgd.sh install
+    # Setup Python environment
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -q --upgrade pip
     
-    print_success "WGDashboard installed successfully"
+    # Install dashboard
+    cd src
+    [[ -f requirements.txt ]] && pip install -q -r requirements.txt
+    chmod +x wgd.sh
+    ./wgd.sh install &>/dev/null
+    
+    # Configure dashboard - LOCAL ACCESS ONLY
+    cat > wg-dashboard.ini << EOF
+[Server]
+app_ip = 127.0.0.1
+app_port = $DASHBOARD_PORT
+auth_req = true
+version = v4.0
+dashboard_refresh_interval = 60000
+dashboard_sort = status
+dashboard_theme = dark
+
+[Peers]
+peer_global_dns = 1.1.1.1
+peer_endpoint_allowed_ip = 0.0.0.0/0
+peer_display_mode = grid
+remote_endpoint = $(get_public_ip)
+peer_mtu = 1420
+peer_keepalive = 21
+EOF
+    
+    deactivate
+    success "Dashboard installed (local access only)"
 }
 
-setup_wgdashboard_service() {
-    print_status "Setting up WGDashboard systemd service..."
+create_service() {
+    msg "Creating systemd service..."
     
     cat > /etc/systemd/system/wgdashboard.service << EOF
 [Unit]
 Description=WGDashboard
-Documentation=https://github.com/donaldzou/WGDashboard
-After=syslog.target network-online.target
-Wants=network-online.target
+After=network.target
 
 [Service]
-Type=forking
+Type=simple
 User=root
-Group=root
 WorkingDirectory=$WG_DASHBOARD_DIR/src
-ExecStart=$WG_DASHBOARD_DIR/src/wgd_wrapper.sh start
-ExecStop=$WG_DASHBOARD_DIR/src/wgd_wrapper.sh stop
-ExecReload=$WG_DASHBOARD_DIR/src/wgd_wrapper.sh restart
-TimeoutSec=30
-RestartSec=15s
+Environment="PATH=$WG_DASHBOARD_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=$WG_DASHBOARD_DIR/venv/bin/python3 $WG_DASHBOARD_DIR/src/dashboard.py
 Restart=always
-KillMode=mixed
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
+    
     systemctl daemon-reload
-    systemctl enable wgdashboard
+    systemctl enable wgdashboard &>/dev/null
+    systemctl restart wgdashboard
     
-    print_success "WGDashboard systemd service created and enabled"
+    success "Dashboard service created"
 }
 
-generate_server_config() {
-    print_status "Generating initial WireGuard server configuration..."
+setup_firewall() {
+    msg "Configuring firewall..."
     
-    cd /etc/wireguard
+    # Install UFW if not present
+    if ! command -v ufw &> /dev/null; then
+        apt-get install -y ufw &>/dev/null
+    fi
     
-    wg genkey | tee server_private.key | wg pubkey > server_public.key
-    chmod 600 server_private.key server_public.key
+    # Configure UFW
+    ufw --force disable &>/dev/null
+    ufw --force reset &>/dev/null
     
-    SERVER_PRIVATE_KEY=$(cat server_private.key)
-    SERVER_PUBLIC_KEY=$(cat server_public.key)
+    ufw default deny incoming &>/dev/null
+    ufw default allow outgoing &>/dev/null
     
-    DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+    # Essential ports only
+    ufw allow 22/tcp comment "SSH" &>/dev/null
+    ufw allow "$WG_PORT/udp" comment "WireGuard" &>/dev/null
+    # Dashboard port NOT opened - local access only
     
-    cat > /etc/wireguard/wg0.conf << EOF
-[Interface]
-PrivateKey = $SERVER_PRIVATE_KEY
-Address = 10.0.0.1/24
-ListenPort = $WG_PORT
-SaveConfig = true
+    ufw --force enable &>/dev/null
+    
+    success "Firewall configured (WireGuard: $WG_PORT/udp)"
+}
 
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
+create_tools() {
+    msg "Creating management tools..."
+    
+    # SSH tunnel helper
+    cat > /usr/local/bin/wg-dashboard << 'EOF'
+#!/bin/bash
+# Quick SSH tunnel for dashboard access
+
+PORT="${1:-10086}"
+SERVER="$2"
+
+if [[ -z "$SERVER" ]]; then
+    echo "Usage: wg-dashboard [port] <server>"
+    echo "Example: wg-dashboard 10086 192.168.1.100"
+    echo ""
+    echo "This creates an SSH tunnel to access the dashboard"
+    echo "After connecting, browse to: http://localhost:8080"
+    exit 1
+fi
+
+echo "Creating SSH tunnel to $SERVER..."
+echo "Dashboard will be available at: http://localhost:8080"
+echo "Press Ctrl+C to close tunnel"
+ssh -N -L 8080:localhost:$PORT root@$SERVER
 EOF
-
-    chmod 600 /etc/wireguard/wg0.conf
-    chmod -R 755 /etc/wireguard
     
-    print_success "Server configuration generated"
-    print_status "Server public key: $SERVER_PUBLIC_KEY"
-}
-
-configure_firewall() {
-    print_status "Configuring firewall with UFW..."
-    
-    apt-get install -y ufw
-    
-    ufw --force reset
-    ufw default deny incoming
-    ufw default allow outgoing
-    
-    ufw allow ssh
-    ufw allow $WG_PORT/udp comment "WireGuard"
-    ufw allow $DASHBOARD_PORT/tcp comment "WGDashboard"
-    
-    ufw --force enable
-    
-    print_success "Firewall configured successfully"
-}
-
-# Override sudo function to handle both root and non-root scenarios
-# Based on: https://nickjanetakis.com/blog/ignore-sudo-in-a-shell-script-if-you-are-running-as-root
-sudo() {
-    if [[ "${EUID}" == 0 ]]; then
-        # If we're root, just run the command without sudo
-        "${@}"
-    else
-        # If we're not root, use actual sudo
-        command sudo "${@}"
-    fi
-}
-
-start_services() {
-    print_status "Starting and enabling services..."
-    
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0
-    
-    if systemctl is-active --quiet wg-quick@wg0; then
-        print_success "WireGuard VPN started and enabled for auto-start"
-    else
-        print_warning "WireGuard VPN may not have started properly. Check systemctl status wg-quick@wg0"
-    fi
-    
-    cd $WG_DASHBOARD_DIR/src
-    
-    # Create a wrapper script that handles sudo calls in wgd.sh
-    print_status "Creating WGDashboard wrapper to handle sudo calls..."
-    cat > ./wgd_wrapper.sh << 'EOF'
+    # Management script
+    cat > /usr/local/bin/wg-manage << 'EOF'
 #!/bin/bash
 
-# Override sudo function for WGDashboard
-sudo() {
-    if [[ "${EUID}" == 0 ]]; then
-        # If we're root, just run the command without sudo
-        "${@}"
-    else
-        # If we're not root, use actual sudo
-        command sudo "${@}"
-    fi
-}
-
-# Export the function so it's available to wgd.sh
-export -f sudo
-
-# Run the original wgd.sh script
-./wgd.sh "$@"
+case "$1" in
+    status)
+        echo "=== WireGuard ==="
+        systemctl status wg-quick@wg0 --no-pager --lines=0
+        echo ""
+        echo "=== Dashboard ==="
+        systemctl status wgdashboard --no-pager --lines=0
+        echo ""
+        echo "=== Peers ==="
+        wg show
+        ;;
+    restart)
+        systemctl restart wg-quick@wg0
+        systemctl restart wgdashboard
+        echo "Services restarted"
+        ;;
+    logs)
+        journalctl -u wgdashboard -u wg-quick@wg0 -n 30 --no-pager
+        ;;
+    backup)
+        backup="/root/wg-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+        tar -czf "$backup" /etc/wireguard 2>/dev/null
+        echo "Backup saved: $backup"
+        ;;
+    *)
+        echo "Usage: wg-manage {status|restart|logs|backup}"
+        ;;
+esac
 EOF
-
-    chmod +x ./wgd_wrapper.sh
     
-    # Start WGDashboard using our wrapper
-    print_status "Starting WGDashboard..."
-    ./wgd_wrapper.sh start
-    print_success "WGDashboard started successfully"
-    
-    systemctl start wgdashboard
-    
-    sleep 5
-    
-    if systemctl is-active --quiet wgdashboard; then
-        print_success "WGDashboard started successfully"
-    else
-        print_warning "WGDashboard may not have started properly. Check systemctl status wgdashboard"
-    fi
+    chmod +x /usr/local/bin/wg-dashboard /usr/local/bin/wg-manage
+    success "Management tools created"
 }
 
-get_public_ip() {
-    PUBLIC_IP=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || curl -s --max-time 10 ipinfo.io/ip 2>/dev/null || echo "Unable to determine")
+show_summary() {
+    PUBLIC_IP=$(get_public_ip)
+    
+    echo ""
+    echo "====================================="
+    echo " Installation Complete!"
+    echo "====================================="
+    echo ""
+    echo "WireGuard VPN:"
+    echo "  Port: $WG_PORT/udp"
+    echo "  Subnet: $WG_SUBNET"
+    echo "  Config: $WG_DIR/${WG_INTERFACE}.conf"
+    [[ "$PUBLIC_IP" != "Unable to determine" ]] && echo "  Endpoint: $PUBLIC_IP:$WG_PORT"
+    echo ""
+    echo "Dashboard Access (LOCAL ONLY):"
+    echo "  URL: http://localhost:$DASHBOARD_PORT"
+    echo "  User: admin"
+    echo "  Pass: admin (change immediately!)"
+    echo ""
+    echo "Remote Dashboard Access:"
+    echo "  Use SSH tunnel: wg-dashboard $DASHBOARD_PORT <server-ip>"
+    echo "  Then browse to: http://localhost:8080"
+    echo ""
+    echo "Management Commands:"
+    echo "  wg-manage status  - Check services"
+    echo "  wg-manage restart - Restart services"
+    echo "  wg-manage logs    - View logs"
+    echo "  wg-manage backup  - Backup config"
+    echo ""
+    echo "Next Steps:"
+    echo "  1. SSH tunnel to access dashboard"
+    echo "  2. Change admin password"
+    echo "  3. Add VPN clients"
+    echo ""
+    success "Setup complete! Dashboard is secure (local access only)"
 }
 
-display_final_info() {
-    get_public_ip
-    
-    echo ""
-    echo "=============================================="
-    print_success "WireGuard + WGDashboard Installation Complete!"
-    echo "=============================================="
-    echo ""
-    
-    print_status "Access Information:"
-    if [[ "$PUBLIC_IP" != "Unable to determine" ]]; then
-        echo "   Web Interface: http://$PUBLIC_IP:$DASHBOARD_PORT"
-    fi
-    echo "   Local Access:  http://localhost:$DASHBOARD_PORT"
-    echo "   Default Login: admin / admin"
-    echo ""
-    
-    print_warning "IMPORTANT SECURITY NOTES:"
-    echo "   1. Change the default admin password immediately!"
-    echo "   2. Consider setting up HTTPS for production use"
-    echo "   3. Ensure your server firewall allows port $WG_PORT (UDP) and $DASHBOARD_PORT (TCP)"
-    echo ""
-    
-    print_status "WireGuard Configuration:"
-    echo "   Config file: /etc/wireguard/wg0.conf"
-    echo "   Server keys: /etc/wireguard/server_*.key"
-    echo "   VPN Status:  wg show"
-    echo "   Auto-start:  ENABLED"
-    echo ""
-    
-    print_status "WGDashboard Management:"
-    echo "   Manual start:  cd $WG_DASHBOARD_DIR/src && ./wgd.sh start"
-    echo "   Manual stop:   cd $WG_DASHBOARD_DIR/src && ./wgd.sh stop"
-    echo "   Service start: systemctl start wgdashboard"
-    echo "   Service stop:  systemctl stop wgdashboard"
-    echo "   Service status: systemctl status wgdashboard"
-    echo "   Auto-start:  ENABLED"
-    echo ""
-    
-    print_status "Next Steps:"
-    echo "   1. Access the dashboard and change default credentials"
-    echo "   2. WireGuard is already running and will auto-start on boot"
-    echo "   3. Add your first peer through the web interface"
-    echo "   4. Download/scan QR code for client configuration"
-    echo ""
-    
-    if [[ "$PUBLIC_IP" != "Unable to determine" ]]; then
-        print_status "Your server's public IP: $PUBLIC_IP"
-        print_status "Use this IP as the endpoint in client configurations"
-    fi
-    
-    echo ""
-    print_status "Documentation:"
-    echo "   WGDashboard: https://docs.wgdashboard.dev/"
-    echo "   WireGuard:   https://www.wireguard.com/"
-    echo ""
-    echo "=============================================="
-    print_success "Installation completed successfully!"
-    echo "=============================================="
+cleanup_on_error() {
+    error "Installation failed! Check $LOG_FILE for details"
+    [[ -n "${BACKUP_DIR:-}" ]] && msg "Restore from: $BACKUP_DIR"
+    exit 1
 }
 
 main() {
-    echo "=============================================="
-    echo "  WireGuard + WGDashboard Auto-Installer"
-    echo "=============================================="
-    echo ""
+    trap cleanup_on_error ERR
     
-    print_status "Starting installation process..."
-    echo ""
-    
+    header
     check_root
-    detect_os
-    update_and_install_essentials
+    check_os
+    check_virt
+    backup_existing
+    install_packages
+    setup_sysctl
     setup_wireguard
-    generate_server_config
-    install_wgdashboard
-    setup_wgdashboard_service
-    configure_firewall
-    start_services
-    display_final_info
-    
-    echo ""
-    print_success "All installation steps completed successfully!"
+    install_dashboard
+    create_service
+    setup_firewall
+    create_tools
+    show_summary
 }
 
-trap 'print_error "Installation failed at line $LINENO. Check the output above for details."' ERR
-
-main "$@" 
+# Run installation
+main "$@"
