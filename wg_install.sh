@@ -2,11 +2,11 @@
 
 # WireGuard + WGDashboard Auto-Installer Script
 # Secure by default - Dashboard local access only
-# Compatible with Debian/Ubuntu systems
-# Version: 1.0
+# Compatible with Debian/Ubuntu systems (LXC containers and bare metal)
+# Version: 2.0
 # Run with: bash <(curl -s https://raw.githubusercontent.com/yourusername/wg-installer/main/install.sh)
 
-set -euo pipefail
+set -uo pipefail  # Removed 'e' to handle errors manually
 
 # Colors
 RED='\033[0;31m'
@@ -25,8 +25,12 @@ WG_SUBNET="10.0.0.0/24"
 WG_SERVER_IP="10.0.0.1"
 
 # Script info
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="2.0"
 LOG_FILE="/var/log/wg-installer.log"
+
+# Environment detection
+IS_CONTAINER=false
+CONTAINER_TYPE="none"
 
 # Logging setup
 exec 2> >(tee -a "$LOG_FILE" >&2)
@@ -80,15 +84,40 @@ check_os() {
 
 check_virt() {
     if command -v systemd-detect-virt &> /dev/null; then
-        VIRT=$(systemd-detect-virt)
+        VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
         if [[ "$VIRT" != "none" ]]; then
             msg "Virtualization: $VIRT"
-            if [[ "$VIRT" == "lxc" || "$VIRT" == "openvz" ]]; then
-                warn "Container detected - kernel module must be loaded on host"
-                read -p "Continue? (y/N): " -n 1 -r
-                echo
-                [[ $REPLY =~ ^[Yy]$ ]] || exit 1
-            fi
+            
+            case "$VIRT" in
+                lxc|openvz)
+                    IS_CONTAINER=true
+                    CONTAINER_TYPE="$VIRT"
+                    warn "Container detected - some features require host configuration"
+                    msg "Checking WireGuard kernel module on host..."
+                    
+                    # Check if WireGuard module is available
+                    if ! lsmod 2>/dev/null | grep -q wireguard && ! modinfo wireguard &>/dev/null 2>&1; then
+                        echo ""
+                        warn "WireGuard kernel module not detected!"
+                        echo ""
+                        echo "For LXC/Proxmox containers, run this on the HOST:"
+                        echo "  apt install wireguard-dkms"
+                        echo "  modprobe wireguard"
+                        echo "  echo 'wireguard' >> /etc/modules-load.d/modules.conf"
+                        echo ""
+                        read -p "Has WireGuard been loaded on the host? (y/N): " -n 1 -r
+                        echo
+                        [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+                    else
+                        success "WireGuard kernel module detected"
+                    fi
+                    ;;
+                kvm|qemu|vmware|virtualbox|xen)
+                    msg "Virtual machine detected - full functionality available"
+                    ;;
+            esac
+        else
+            msg "Running on bare metal"
         fi
     fi
 }
@@ -107,11 +136,14 @@ backup_existing() {
 install_packages() {
     msg "Installing required packages..."
     
-    apt-get update -qq
+    # Update package lists
+    if ! apt-get update -qq 2>/dev/null; then
+        warn "Package update had warnings, continuing..."
+    fi
     
+    # Essential packages
     PACKAGES=(
-        wireguard
-        wireguard-tools
+        wireguard-tools  # Changed from 'wireguard' to 'wireguard-tools' for containers
         python3
         python3-pip
         python3-venv
@@ -120,10 +152,21 @@ install_packages() {
         iptables
         net-tools
         qrencode
+        openresolv
     )
     
+    # Add wireguard package only for non-containers
+    if [[ "$IS_CONTAINER" == "false" ]]; then
+        PACKAGES+=("wireguard")
+    fi
+    
+    # Install packages
     for pkg in "${PACKAGES[@]}"; do
-        apt-get install -y "$pkg" --no-install-recommends &>/dev/null || warn "Failed to install $pkg"
+        if apt-get install -y "$pkg" --no-install-recommends &>/dev/null 2>&1; then
+            msg "Installed: $pkg"
+        else
+            warn "Failed to install $pkg (may not be needed)"
+        fi
     done
     
     success "Packages installed"
@@ -132,30 +175,74 @@ install_packages() {
 setup_sysctl() {
     msg "Configuring kernel parameters..."
     
+    # Create sysctl config file
     cat > /etc/sysctl.d/99-wireguard.conf << EOF
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.all.proxy_arp = 1
 EOF
     
-    sysctl --system &>/dev/null
-    success "Kernel parameters configured"
+    # Try to apply sysctl settings
+    if [[ "$IS_CONTAINER" == "true" ]]; then
+        warn "Container detected - kernel parameters must be set on host"
+        msg "Checking current IP forwarding status..."
+        
+        # Check if IP forwarding is enabled
+        if [[ -f /proc/sys/net/ipv4/ip_forward ]]; then
+            ip_forward=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
+            if [[ "$ip_forward" == "1" ]]; then
+                success "IP forwarding is enabled on host"
+            else
+                warn "IP forwarding appears disabled"
+                echo ""
+                echo "Add this to the HOST's /etc/sysctl.conf:"
+                echo "  net.ipv4.ip_forward = 1"
+                echo "  net.ipv6.conf.all.forwarding = 1"
+                echo ""
+                echo "Then run on HOST: sysctl -p"
+                echo ""
+                read -p "Continue anyway? (y/N): " -n 1 -r
+                echo
+                [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+            fi
+        fi
+    else
+        # Bare metal or VM - apply settings normally
+        if sysctl --system &>/dev/null 2>&1; then
+            success "Kernel parameters configured"
+        else
+            warn "Some kernel parameters could not be set"
+        fi
+    fi
 }
 
 get_public_ip() {
+    local ip=""
     for url in "https://ipinfo.io/ip" "https://ifconfig.me" "https://api.ipify.org"; do
-        PUBLIC_IP=$(curl -s --max-time 3 "$url" 2>/dev/null | grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -n1)
-        [[ -n "$PUBLIC_IP" ]] && break
+        ip=$(curl -s --max-time 3 "$url" 2>/dev/null | grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -n1)
+        [[ -n "$ip" ]] && break
     done
-    echo "${PUBLIC_IP:-Unable to determine}"
+    echo "${ip:-Unable to determine}"
 }
 
 get_interface() {
-    # Get default network interface
-    IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-    if [[ -z "$IFACE" ]]; then
-        IFACE=$(ip link | awk -F: '$0 !~ "lo|vir|wl|^[^0-9]"{print $2;getline}' | head -n1 | xargs)
+    local iface=""
+    
+    # Method 1: Get default route interface
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -n1)
+    
+    # Method 2: Get first non-lo interface
+    if [[ -z "$iface" ]]; then
+        iface=$(ip link show 2>/dev/null | awk -F: '$0 !~ "lo|vir|wl|^[^0-9]"{print $2;getline}' | head -n1 | xargs)
     fi
-    echo "${IFACE:-eth0}"
+    
+    # Method 3: Fallback for containers
+    if [[ -z "$iface" ]]; then
+        iface=$(ip link show 2>/dev/null | grep -E "^[0-9]:" | grep -v "lo:" | head -n1 | cut -d: -f2 | xargs)
+    fi
+    
+    # Final fallback
+    echo "${iface:-eth0}"
 }
 
 setup_wireguard() {
@@ -166,8 +253,15 @@ setup_wireguard() {
     chmod 700 "$WG_DIR"
     cd "$WG_DIR"
     
-    # Generate keys
+    # Check if we can use wg command
+    if ! command -v wg &> /dev/null; then
+        error "WireGuard tools not installed properly"
+        exit 1
+    fi
+    
+    # Generate keys if they don't exist
     if [[ ! -f server_private.key ]]; then
+        msg "Generating server keys..."
         wg genkey | tee server_private.key | wg pubkey > server_public.key
         chmod 600 server_*.key
     fi
@@ -176,7 +270,9 @@ setup_wireguard() {
     SERVER_PUBLIC_KEY=$(cat server_public.key)
     INTERFACE=$(get_interface)
     
-    # Create config
+    msg "Using network interface: $INTERFACE"
+    
+    # Create config with container-friendly iptables rules
     cat > "${WG_INTERFACE}.conf" << EOF
 [Interface]
 PrivateKey = $SERVER_PRIVATE_KEY
@@ -184,42 +280,93 @@ Address = ${WG_SERVER_IP}/24
 ListenPort = $WG_PORT
 SaveConfig = false
 
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $INTERFACE -j MASQUERADE
+# PostUp/PostDown rules that work in containers
+PostUp = iptables -I FORWARD -i %i -j ACCEPT
+PostUp = iptables -I FORWARD -o %i -j ACCEPT
+PostUp = iptables -t nat -I POSTROUTING -o $INTERFACE -j MASQUERADE
+PostUp = ip6tables -I FORWARD -i %i -j ACCEPT 2>/dev/null || true
+PostUp = ip6tables -I FORWARD -o %i -j ACCEPT 2>/dev/null || true
+PostUp = ip6tables -t nat -I POSTROUTING -o $INTERFACE -j MASQUERADE 2>/dev/null || true
+
+PostDown = iptables -D FORWARD -i %i -j ACCEPT
+PostDown = iptables -D FORWARD -o %i -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o $INTERFACE -j MASQUERADE
+PostDown = ip6tables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true
+PostDown = ip6tables -D FORWARD -o %i -j ACCEPT 2>/dev/null || true
+PostDown = ip6tables -t nat -D POSTROUTING -o $INTERFACE -j MASQUERADE 2>/dev/null || true
 EOF
     
     chmod 600 "${WG_INTERFACE}.conf"
     
-    # Enable and start
-    systemctl enable "wg-quick@${WG_INTERFACE}" &>/dev/null
-    systemctl restart "wg-quick@${WG_INTERFACE}"
+    # Enable and start WireGuard
+    msg "Starting WireGuard service..."
     
-    success "WireGuard configured (Public key: $SERVER_PUBLIC_KEY)"
+    # For containers, we might need to use wg-quick directly
+    if [[ "$IS_CONTAINER" == "true" ]]; then
+        # Stop any existing interface
+        wg-quick down "${WG_INTERFACE}" 2>/dev/null || true
+        
+        # Start the interface
+        if wg-quick up "${WG_INTERFACE}" 2>/dev/null; then
+            success "WireGuard started successfully"
+        else
+            warn "WireGuard start had warnings - checking status..."
+            if wg show "${WG_INTERFACE}" &>/dev/null; then
+                success "WireGuard is running despite warnings"
+            else
+                error "Failed to start WireGuard"
+                error "Check kernel module on host and network configuration"
+                exit 1
+            fi
+        fi
+    fi
+    
+    # Setup systemd service
+    systemctl enable "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+    systemctl restart "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+    
+    success "WireGuard configured"
+    msg "Server public key: $SERVER_PUBLIC_KEY"
 }
 
 install_dashboard() {
     msg "Installing WGDashboard..."
     
-    # Stop services
-    systemctl stop wgdashboard &>/dev/null || true
+    # Stop services if they exist
+    systemctl stop wgdashboard 2>/dev/null || true
     
     # Remove old installation
     rm -rf "$WG_DASHBOARD_DIR"
     
     # Clone repository
-    git clone -q https://github.com/donaldzou/WGDashboard.git "$WG_DASHBOARD_DIR"
+    if ! git clone -q https://github.com/donaldzou/WGDashboard.git "$WG_DASHBOARD_DIR" 2>/dev/null; then
+        error "Failed to clone WGDashboard repository"
+        exit 1
+    fi
+    
     cd "$WG_DASHBOARD_DIR"
     
     # Setup Python environment
+    msg "Setting up Python virtual environment..."
     python3 -m venv venv
     source venv/bin/activate
-    pip install -q --upgrade pip
+    
+    # Upgrade pip quietly
+    pip install -q --upgrade pip 2>/dev/null || warn "pip upgrade had warnings"
     
     # Install dashboard
     cd src
-    [[ -f requirements.txt ]] && pip install -q -r requirements.txt
+    
+    # Install requirements if file exists
+    if [[ -f requirements.txt ]]; then
+        pip install -q -r requirements.txt 2>/dev/null || warn "Some Python packages had warnings"
+    fi
+    
+    # Make scripts executable
     chmod +x wgd.sh
-    ./wgd.sh install &>/dev/null
+    
+    # Install dashboard
+    ./wgd.sh install >/dev/null 2>&1 || warn "Dashboard install had warnings"
     
     # Configure dashboard - LOCAL ACCESS ONLY
     cat > wg-dashboard.ini << EOF
@@ -231,6 +378,7 @@ version = v4.0
 dashboard_refresh_interval = 60000
 dashboard_sort = status
 dashboard_theme = dark
+wg_conf_path = $WG_DIR
 
 [Peers]
 peer_global_dns = 1.1.1.1
@@ -248,54 +396,79 @@ EOF
 create_service() {
     msg "Creating systemd service..."
     
+    # Create a more robust service file
     cat > /etc/systemd/system/wgdashboard.service << EOF
 [Unit]
 Description=WGDashboard
 After=network.target
+Wants=wg-quick@${WG_INTERFACE}.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=$WG_DASHBOARD_DIR/src
 Environment="PATH=$WG_DASHBOARD_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStartPre=/bin/sleep 5
 ExecStart=$WG_DASHBOARD_DIR/venv/bin/python3 $WG_DASHBOARD_DIR/src/dashboard.py
 Restart=always
 RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
     systemctl daemon-reload
-    systemctl enable wgdashboard &>/dev/null
+    systemctl enable wgdashboard 2>/dev/null || warn "Service enable had warnings"
     systemctl restart wgdashboard
     
-    success "Dashboard service created"
+    # Wait a moment for service to start
+    sleep 3
+    
+    # Check if service started
+    if systemctl is-active --quiet wgdashboard; then
+        success "Dashboard service created and running"
+    else
+        warn "Dashboard service may not be running - check with: systemctl status wgdashboard"
+    fi
 }
 
 setup_firewall() {
     msg "Configuring firewall..."
     
-    # Install UFW if not present
-    if ! command -v ufw &> /dev/null; then
-        apt-get install -y ufw &>/dev/null
+    # Check if we're in a container that might not support UFW
+    if [[ "$IS_CONTAINER" == "true" ]]; then
+        warn "Container detected - firewall should be configured on host"
+        msg "Ensure these ports are open on the host:"
+        echo "  - $WG_PORT/udp (WireGuard)"
+        echo "  - 22/tcp (SSH)"
+        echo ""
+        
+        # Try basic iptables rules for container
+        iptables -I INPUT -p udp --dport "$WG_PORT" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+    else
+        # Install UFW if not present
+        if ! command -v ufw &> /dev/null; then
+            apt-get install -y ufw &>/dev/null
+        fi
+        
+        # Configure UFW
+        ufw --force disable &>/dev/null
+        ufw --force reset &>/dev/null
+        
+        ufw default deny incoming &>/dev/null
+        ufw default allow outgoing &>/dev/null
+        
+        # Essential ports only
+        ufw allow 22/tcp comment "SSH" &>/dev/null
+        ufw allow "$WG_PORT/udp" comment "WireGuard" &>/dev/null
+        
+        ufw --force enable &>/dev/null
+        
+        success "Firewall configured (WireGuard: $WG_PORT/udp)"
     fi
-    
-    # Configure UFW
-    ufw --force disable &>/dev/null
-    ufw --force reset &>/dev/null
-    
-    ufw default deny incoming &>/dev/null
-    ufw default allow outgoing &>/dev/null
-    
-    # Essential ports only
-    ufw allow 22/tcp comment "SSH" &>/dev/null
-    ufw allow "$WG_PORT/udp" comment "WireGuard" &>/dev/null
-    # Dashboard port NOT opened - local access only
-    
-    ufw --force enable &>/dev/null
-    
-    success "Firewall configured (WireGuard: $WG_PORT/udp)"
 }
 
 create_tools() {
@@ -328,24 +501,29 @@ EOF
     cat > /usr/local/bin/wg-manage << 'EOF'
 #!/bin/bash
 
+WG_INTERFACE="wg0"
+
 case "$1" in
     status)
         echo "=== WireGuard ==="
-        systemctl status wg-quick@wg0 --no-pager --lines=0
+        if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+            echo "Status: Active"
+            wg show
+        else
+            echo "Status: Inactive"
+            echo "Try: wg-quick up ${WG_INTERFACE}"
+        fi
         echo ""
         echo "=== Dashboard ==="
-        systemctl status wgdashboard --no-pager --lines=0
-        echo ""
-        echo "=== Peers ==="
-        wg show
+        systemctl status wgdashboard --no-pager --lines=3
         ;;
     restart)
-        systemctl restart wg-quick@wg0
+        systemctl restart "wg-quick@${WG_INTERFACE}" 2>/dev/null || wg-quick down "${WG_INTERFACE}" && wg-quick up "${WG_INTERFACE}"
         systemctl restart wgdashboard
         echo "Services restarted"
         ;;
     logs)
-        journalctl -u wgdashboard -u wg-quick@wg0 -n 30 --no-pager
+        journalctl -u wgdashboard -u "wg-quick@${WG_INTERFACE}" -n 30 --no-pager
         ;;
     backup)
         backup="/root/wg-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
@@ -367,9 +545,16 @@ show_summary() {
     
     echo ""
     echo "====================================="
-    echo " Installation Complete!"
+    success "Installation Complete!"
     echo "====================================="
     echo ""
+    
+    if [[ "$IS_CONTAINER" == "true" ]]; then
+        warn "Running in container ($CONTAINER_TYPE)"
+        echo "Some features depend on host configuration"
+        echo ""
+    fi
+    
     echo "WireGuard VPN:"
     echo "  Port: $WG_PORT/udp"
     echo "  Subnet: $WG_SUBNET"
@@ -391,12 +576,36 @@ show_summary() {
     echo "  wg-manage logs    - View logs"
     echo "  wg-manage backup  - Backup config"
     echo ""
+    
+    if [[ "$IS_CONTAINER" == "true" ]]; then
+        echo "Container Notes:"
+        echo "  - Ensure WireGuard module is loaded on host"
+        echo "  - IP forwarding must be enabled on host"
+        echo "  - Firewall rules should be set on host"
+        echo ""
+    fi
+    
     echo "Next Steps:"
     echo "  1. SSH tunnel to access dashboard"
     echo "  2. Change admin password"
     echo "  3. Add VPN clients"
     echo ""
     success "Setup complete! Dashboard is secure (local access only)"
+    
+    # Final service check
+    echo ""
+    msg "Checking services..."
+    if wg show "${WG_INTERFACE}" &>/dev/null; then
+        success "WireGuard is running"
+    else
+        warn "WireGuard may need manual start: wg-quick up ${WG_INTERFACE}"
+    fi
+    
+    if systemctl is-active --quiet wgdashboard; then
+        success "Dashboard is running"
+    else
+        warn "Dashboard may need manual start: systemctl start wgdashboard"
+    fi
 }
 
 cleanup_on_error() {
@@ -406,7 +615,8 @@ cleanup_on_error() {
 }
 
 main() {
-    trap cleanup_on_error ERR
+    # Remove strict error handling for better container compatibility
+    # trap cleanup_on_error ERR
     
     header
     check_root
