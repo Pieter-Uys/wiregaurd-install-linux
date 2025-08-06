@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # WireGuard + WGDashboard Auto-Installer Script
-# Secure by default - Dashboard local access only
+# Secure by default with option for network access
 # Compatible with Debian/Ubuntu systems (LXC containers and bare metal)
-# Version: 2.0
+# Version: 3.0
 # Run with: bash <(curl -s https://raw.githubusercontent.com/yourusername/wg-installer/main/install.sh)
 
 set -uo pipefail  # Removed 'e' to handle errors manually
@@ -13,6 +13,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
@@ -24,8 +25,11 @@ WG_INTERFACE="wg0"
 WG_SUBNET="10.0.0.0/24"
 WG_SERVER_IP="10.0.0.1"
 
+# Dashboard access mode (will be set by user choice)
+DASHBOARD_IP="127.0.0.1"  # Default to local only
+
 # Script info
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="3.0"
 LOG_FILE="/var/log/wg-installer.log"
 
 # Environment detection
@@ -120,6 +124,49 @@ check_virt() {
             msg "Running on bare metal"
         fi
     fi
+}
+
+ask_dashboard_access() {
+    echo ""
+    echo -e "${CYAN}Dashboard Access Configuration${NC}"
+    echo "================================="
+    echo ""
+    echo "How do you want to access the WGDashboard?"
+    echo ""
+    echo "1) Local only (Most Secure - Requires SSH tunnel)"
+    echo "   - Dashboard only accessible from localhost"
+    echo "   - Remote access via SSH tunnel"
+    echo "   - Recommended for production"
+    echo ""
+    echo "2) Local Network (Less Secure - Direct access from LAN)"
+    echo "   - Dashboard accessible from your local network"
+    echo "   - Direct access from any device on your network"
+    echo "   - Convenient for home/lab use"
+    echo ""
+    
+    while true; do
+        read -p "Select option [1-2] (default: 1): " choice
+        choice=${choice:-1}
+        
+        case $choice in
+            1)
+                DASHBOARD_IP="127.0.0.1"
+                success "Dashboard will be LOCAL ONLY (secure)"
+                msg "You'll need SSH tunnel for remote access"
+                break
+                ;;
+            2)
+                DASHBOARD_IP="0.0.0.0"
+                warn "Dashboard will be accessible from your network"
+                msg "Make sure to change the default password immediately!"
+                break
+                ;;
+            *)
+                error "Invalid option. Please select 1 or 2"
+                ;;
+        esac
+    done
+    echo ""
 }
 
 backup_existing() {
@@ -222,6 +269,16 @@ get_public_ip() {
         ip=$(curl -s --max-time 3 "$url" 2>/dev/null | grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -n1)
         [[ -n "$ip" ]] && break
     done
+    echo "${ip:-Unable to determine}"
+}
+
+get_local_ip() {
+    # Get the local IP address
+    local ip=""
+    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+    if [[ -z "$ip" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
     echo "${ip:-Unable to determine}"
 }
 
@@ -368,10 +425,10 @@ install_dashboard() {
     # Install dashboard
     ./wgd.sh install >/dev/null 2>&1 || warn "Dashboard install had warnings"
     
-    # Configure dashboard - LOCAL ACCESS ONLY
+    # Configure dashboard based on user choice
     cat > wg-dashboard.ini << EOF
 [Server]
-app_ip = 127.0.0.1
+app_ip = $DASHBOARD_IP
 app_port = $DASHBOARD_PORT
 auth_req = true
 version = v4.0
@@ -390,7 +447,12 @@ peer_keepalive = 21
 EOF
     
     deactivate
-    success "Dashboard installed (local access only)"
+    
+    if [[ "$DASHBOARD_IP" == "127.0.0.1" ]]; then
+        success "Dashboard installed (local access only)"
+    else
+        success "Dashboard installed (network accessible)"
+    fi
 }
 
 create_service() {
@@ -443,11 +505,17 @@ setup_firewall() {
         msg "Ensure these ports are open on the host:"
         echo "  - $WG_PORT/udp (WireGuard)"
         echo "  - 22/tcp (SSH)"
+        if [[ "$DASHBOARD_IP" == "0.0.0.0" ]]; then
+            echo "  - $DASHBOARD_PORT/tcp (Dashboard - if you want external access)"
+        fi
         echo ""
         
         # Try basic iptables rules for container
         iptables -I INPUT -p udp --dport "$WG_PORT" -j ACCEPT 2>/dev/null || true
         iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+        if [[ "$DASHBOARD_IP" == "0.0.0.0" ]]; then
+            iptables -I INPUT -p tcp --dport "$DASHBOARD_PORT" -j ACCEPT 2>/dev/null || true
+        fi
     else
         # Install UFW if not present
         if ! command -v ufw &> /dev/null; then
@@ -461,13 +529,19 @@ setup_firewall() {
         ufw default deny incoming &>/dev/null
         ufw default allow outgoing &>/dev/null
         
-        # Essential ports only
+        # Essential ports
         ufw allow 22/tcp comment "SSH" &>/dev/null
         ufw allow "$WG_PORT/udp" comment "WireGuard" &>/dev/null
         
+        # Dashboard port if network access is enabled
+        if [[ "$DASHBOARD_IP" == "0.0.0.0" ]]; then
+            ufw allow "$DASHBOARD_PORT/tcp" comment "WGDashboard" &>/dev/null
+            warn "Dashboard port $DASHBOARD_PORT/tcp opened in firewall"
+        fi
+        
         ufw --force enable &>/dev/null
         
-        success "Firewall configured (WireGuard: $WG_PORT/udp)"
+        success "Firewall configured"
     fi
 }
 
@@ -475,7 +549,7 @@ create_tools() {
     msg "Creating management tools..."
     
     # SSH tunnel helper
-    cat > /usr/local/bin/wg-dashboard << 'EOF'
+    cat > /usr/local/bin/wg-tunnel << 'EOF'
 #!/bin/bash
 # Quick SSH tunnel for dashboard access
 
@@ -483,8 +557,8 @@ PORT="${1:-10086}"
 SERVER="$2"
 
 if [[ -z "$SERVER" ]]; then
-    echo "Usage: wg-dashboard [port] <server>"
-    echo "Example: wg-dashboard 10086 192.168.1.100"
+    echo "Usage: wg-tunnel [port] <server>"
+    echo "Example: wg-tunnel 10086 192.168.1.100"
     echo ""
     echo "This creates an SSH tunnel to access the dashboard"
     echo "After connecting, browse to: http://localhost:8080"
@@ -502,6 +576,8 @@ EOF
 #!/bin/bash
 
 WG_INTERFACE="wg0"
+WG_DASHBOARD_DIR="/opt/WGDashboard"
+DASHBOARD_PORT="10086"
 
 case "$1" in
     status)
@@ -516,6 +592,18 @@ case "$1" in
         echo ""
         echo "=== Dashboard ==="
         systemctl status wgdashboard --no-pager --lines=3
+        
+        # Show dashboard access info
+        echo ""
+        echo "=== Dashboard Access ==="
+        if grep -q "app_ip = 127.0.0.1" "$WG_DASHBOARD_DIR/src/wg-dashboard.ini" 2>/dev/null; then
+            echo "Mode: Local only (SSH tunnel required)"
+            echo "Use: wg-tunnel $DASHBOARD_PORT <server-ip>"
+        else
+            echo "Mode: Network accessible"
+            local_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+            [[ -n "$local_ip" ]] && echo "URL: http://$local_ip:$DASHBOARD_PORT"
+        fi
         ;;
     restart)
         systemctl restart "wg-quick@${WG_INTERFACE}" 2>/dev/null || wg-quick down "${WG_INTERFACE}" && wg-quick up "${WG_INTERFACE}"
@@ -527,7 +615,7 @@ case "$1" in
         ;;
     backup)
         backup="/root/wg-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-        tar -czf "$backup" /etc/wireguard 2>/dev/null
+        tar -czf "$backup" /etc/wireguard "$WG_DASHBOARD_DIR/src/wg-dashboard.ini" 2>/dev/null
         echo "Backup saved: $backup"
         ;;
     *)
@@ -536,12 +624,13 @@ case "$1" in
 esac
 EOF
     
-    chmod +x /usr/local/bin/wg-dashboard /usr/local/bin/wg-manage
+    chmod +x /usr/local/bin/wg-tunnel /usr/local/bin/wg-manage
     success "Management tools created"
 }
 
 show_summary() {
     PUBLIC_IP=$(get_public_ip)
+    LOCAL_IP=$(get_local_ip)
     
     echo ""
     echo "====================================="
@@ -561,20 +650,39 @@ show_summary() {
     echo "  Config: $WG_DIR/${WG_INTERFACE}.conf"
     [[ "$PUBLIC_IP" != "Unable to determine" ]] && echo "  Endpoint: $PUBLIC_IP:$WG_PORT"
     echo ""
-    echo "Dashboard Access (LOCAL ONLY):"
-    echo "  URL: http://localhost:$DASHBOARD_PORT"
-    echo "  User: admin"
-    echo "  Pass: admin (change immediately!)"
+    
+    echo "Dashboard Access:"
+    if [[ "$DASHBOARD_IP" == "127.0.0.1" ]]; then
+        echo "  Mode: LOCAL ONLY (Secure)"
+        echo "  Local URL: http://localhost:$DASHBOARD_PORT"
+        echo ""
+        echo "  Remote Access via SSH Tunnel:"
+        echo "    From your computer run:"
+        echo "    ssh -L 8080:localhost:$DASHBOARD_PORT root@$LOCAL_IP"
+        echo "    Then browse to: http://localhost:8080"
+    else
+        echo "  Mode: NETWORK ACCESSIBLE"
+        echo "  Local URL: http://localhost:$DASHBOARD_PORT"
+        [[ "$LOCAL_IP" != "Unable to determine" ]] && echo "  Network URL: http://$LOCAL_IP:$DASHBOARD_PORT"
+        [[ "$PUBLIC_IP" != "Unable to determine" ]] && echo "  External URL: http://$PUBLIC_IP:$DASHBOARD_PORT (if port forwarded)"
+        echo ""
+        warn "Dashboard is accessible from your network!"
+        warn "CHANGE THE DEFAULT PASSWORD IMMEDIATELY!"
+    fi
     echo ""
-    echo "Remote Dashboard Access:"
-    echo "  Use SSH tunnel: wg-dashboard $DASHBOARD_PORT <server-ip>"
-    echo "  Then browse to: http://localhost:8080"
+    echo "  Default Login:"
+    echo "    User: admin"
+    echo "    Pass: admin"
     echo ""
+    
     echo "Management Commands:"
     echo "  wg-manage status  - Check services"
     echo "  wg-manage restart - Restart services"
     echo "  wg-manage logs    - View logs"
     echo "  wg-manage backup  - Backup config"
+    if [[ "$DASHBOARD_IP" == "127.0.0.1" ]]; then
+        echo "  wg-tunnel $DASHBOARD_PORT <server-ip> - Create SSH tunnel"
+    fi
     echo ""
     
     if [[ "$IS_CONTAINER" == "true" ]]; then
@@ -586,11 +694,21 @@ show_summary() {
     fi
     
     echo "Next Steps:"
-    echo "  1. SSH tunnel to access dashboard"
-    echo "  2. Change admin password"
+    if [[ "$DASHBOARD_IP" == "127.0.0.1" ]]; then
+        echo "  1. SSH tunnel to access dashboard"
+    else
+        echo "  1. Access dashboard at http://$LOCAL_IP:$DASHBOARD_PORT"
+    fi
+    echo "  2. Change admin password IMMEDIATELY"
     echo "  3. Add VPN clients"
     echo ""
-    success "Setup complete! Dashboard is secure (local access only)"
+    
+    if [[ "$DASHBOARD_IP" == "127.0.0.1" ]]; then
+        success "Setup complete! Dashboard is secure (local access only)"
+    else
+        success "Setup complete! Dashboard is network accessible"
+        warn "Remember to change the default password!"
+    fi
     
     # Final service check
     echo ""
@@ -622,6 +740,7 @@ main() {
     check_root
     check_os
     check_virt
+    ask_dashboard_access  # Ask user how they want to access dashboard
     backup_existing
     install_packages
     setup_sysctl
